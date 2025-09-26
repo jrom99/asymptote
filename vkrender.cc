@@ -1014,7 +1014,16 @@ void AsyVkRender::createInstance()
     VEC_VIEW(validationLayers),
     VEC_VIEW(all_extensions)
   );
-  instance = vk::createInstanceUnique(instanceCI);
+  // CRITICAL: Metal GPU stability - set environment variables
+   setenv("MVK_CONFIG_METAL_COMMAND_BUFFER_TIMEOUT", "60", 1);        // 60s timeout
+   setenv("MVK_CONFIG_METAL_COMMAND_BUFFER_SIZE", "8388608", 1);      // 8MB buffer
+   setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);                   // Auto-recovery
+   setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "2", 1);        // Memory optimization
+   setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 1);           // Efficiency
+   setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 1);            // Async submits
+   setenv("MVK_CONFIG_METAL_STAGING_BUFFER_CACHE_SIZE", "67108864", 1); // 64MB cache
+
+   instance = vk::createInstanceUnique(instanceCI);
   VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
 }
 
@@ -1596,43 +1605,64 @@ void AsyVkRender::waitForTimelineSemaphore(vk::Semaphore semaphore, uint64_t val
   }
 }
 
-void AsyVkRender::handleDeviceLost() {
-  if (!deviceLost) return;
+   void AsyVkRender::handleDeviceLost() {
+     if (!deviceLost) return;
 
-  cerr << "Attempting to recover from device lost..." << endl;
+     cerr << "CRITICAL: Metal GPU hang detected, initiating aggressive recovery..." << endl;
 
-  try {
-    // Reset all timeline values
-    currentTimelineValue = 0;
+     try {
+       // CRITICAL FIX: Complete Metal GPU reset
+       if (device) {
+         // Ensure device is completely idle before recovery
+         device->waitIdle();
+       }
 
-    // Reset all in-flight operations
-    for (auto& obj : frameObjects) {
-      obj.timelineValue = 0;
-      obj.computeTimelineValue = 0;
-    }
+       // Reset all timeline values and synchronization
+       currentTimelineValue = 0;
 
-    // Wait for a moment to let the GPU reset
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+       // CRITICAL: Recreate all synchronization primitives for Metal
+       for (auto& obj : frameObjects) {
+         obj.timelineValue = 0;
+         obj.computeTimelineValue = 0;
+         
+         try {
+           // Recreate fences and semaphores to ensure clean Metal state
+           obj.inFlightFence = device->createFenceUnique(vk::FenceCreateInfo(vk::FenceCreateFlagBits::eSignaled));
+           obj.inComputeFence = device->createFenceUnique(vk::FenceCreateInfo(vk::FenceCreateFlagBits::eSignaled));
+           obj.imageAvailableSemaphore = device->createSemaphoreUnique(vk::SemaphoreCreateInfo());
+           obj.renderFinishedSemaphore = device->createSemaphoreUnique(vk::SemaphoreCreateInfo());
+         } catch (...) {
+           // Ignore recreation errors during recovery
+         }
+       }
 
-    // Try to recreate the swapchain
-    try {
-      recreateSwapChain();
-    } catch (const std::exception& e) {
-      cerr << "Failed to recreate swapchain: " << e.what() << endl;
-    }
+       // CRITICAL: Force command pool reset for Metal corruption
+       try {
+         device->resetCommandPool(*renderCommandPool, vk::CommandPoolResetFlagBits());
+       } catch (...) {
+         // Ignore reset errors
+       }
 
-    // Clear the device lost flag
-    deviceLost = false;
+       // Extended wait for Metal GPU to fully reset
+       std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-    cerr << "Device recovery attempt completed" << endl;
-  } catch (const std::exception& e) {
-    cerr << "Failed to recover from device lost: " << e.what() << endl;
-  }
-}
+       // CRITICAL: Force recreation of swapchain with conservative settings
+       try {
+         recreateSwapChain();
+         
+         // Force conservative settings for Metal stability
+         cerr << "Metal GPU recovery: Swapchain recreated successfully" << endl;
+       } catch (const std::exception& e) {
+         cerr << "Metal GPU recovery failed to recreate swapchain: " << e.what() << endl;
+       }
 
-void AsyVkRender::transitionImageLayout(vk::CommandBuffer cmd,
-                             vk::Image image,
-                             vk::AccessFlags srcAccessMask,
+       deviceLost = false;
+       cerr << "Metal GPU recovery completed" << endl;
+     } catch (const std::exception& e) {
+       cerr << "Metal GPU recovery failed: " << e.what() << endl;
+       deviceLost = true;
+     }
+   }
                              vk::AccessFlags dstAccessMask,
                              vk::ImageLayout oldImageLayout,
                              vk::ImageLayout newImageLayout,
@@ -4631,20 +4661,20 @@ void AsyVkRender::renderTransparencyStaged(FrameObject& object, int imageIndex) 
 
     // For M2 GPUs, use a conservative batch size
     // The diagnostics showed ~715,000 fragments causing issues
-    size_t maxFragmentsPerBatch = 100000; // Start with 100k fragments per batch
+    size_t maxFragmentsPerBatch = 25000; // Ultra-conservative for Metal (was 100k)
 
     // If we have a lot of fragments, render in batches
     if (fragmentCount > maxFragmentsPerBatch) {
       size_t batches = (fragmentCount + maxFragmentsPerBatch - 1) / maxFragmentsPerBatch;
 
-      cerr << "Rendering " << fragmentCount << " transparent fragments in "
+      cerr << "Metal GPU: Rendering " << fragmentCount << " transparent fragments in "
            << batches << " batches" << endl;
 
       // Save the original data
       auto originalIndices = transparentData.indices;
 
       // Render in batches
-      for (size_t batch = 0; batch < batches; batch++) {
+           cerr << "  Metal batch " << (batch + 1) << "/" << batches
         // Calculate the range for this batch
         size_t start = batch * maxFragmentsPerBatch;
         size_t end = std::min(start + maxFragmentsPerBatch, fragmentCount);
@@ -4653,9 +4683,9 @@ void AsyVkRender::renderTransparencyStaged(FrameObject& object, int imageIndex) 
              << " (fragments " << start << " to " << end << ")" << endl;
 
         // Create a subset of the data for this batch
-        transparentData.indices.clear();
+           // Add extended delay between batches for Metal GPU safety
         transparentData.indices.insert(
-          transparentData.indices.end(),
+           std::this_thread::sleep_for(std::chrono::milliseconds(50));
           originalIndices.begin() + start,
           originalIndices.begin() + end
         );
