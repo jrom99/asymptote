@@ -1624,7 +1624,7 @@ void AsyVkRender::waitForTimelineSemaphore(vk::Semaphore semaphore, uint64_t val
        for (auto& obj : frameObjects) {
          obj.timelineValue = 0;
          obj.computeTimelineValue = 0;
-         
+
          try {
            // Recreate fences and semaphores to ensure clean Metal state
            obj.inFlightFence = device->createFenceUnique(vk::FenceCreateInfo(vk::FenceCreateFlagBits::eSignaled));
@@ -1649,7 +1649,7 @@ void AsyVkRender::waitForTimelineSemaphore(vk::Semaphore semaphore, uint64_t val
        // CRITICAL: Force recreation of swapchain with conservative settings
        try {
          recreateSwapChain();
-         
+
          // Force conservative settings for Metal stability
          cerr << "Metal GPU recovery: Swapchain recreated successfully" << endl;
        } catch (const std::exception& e) {
@@ -1663,6 +1663,10 @@ void AsyVkRender::waitForTimelineSemaphore(vk::Semaphore semaphore, uint64_t val
        deviceLost = true;
      }
    }
+
+void AsyVkRender::transitionImageLayout(vk::CommandBuffer cmd,
+                             vk::Image image,
+                             vk::AccessFlags srcAccessMask,
                              vk::AccessFlags dstAccessMask,
                              vk::ImageLayout oldImageLayout,
                              vk::ImageLayout newImageLayout,
@@ -4661,20 +4665,20 @@ void AsyVkRender::renderTransparencyStaged(FrameObject& object, int imageIndex) 
 
     // For M2 GPUs, use a conservative batch size
     // The diagnostics showed ~715,000 fragments causing issues
-    size_t maxFragmentsPerBatch = 25000; // Ultra-conservative for Metal (was 100k)
+    size_t maxFragmentsPerBatch = 100000; // Start with 100k fragments per batch
 
     // If we have a lot of fragments, render in batches
     if (fragmentCount > maxFragmentsPerBatch) {
       size_t batches = (fragmentCount + maxFragmentsPerBatch - 1) / maxFragmentsPerBatch;
 
-      cerr << "Metal GPU: Rendering " << fragmentCount << " transparent fragments in "
+      cerr << "Rendering " << fragmentCount << " transparent fragments in "
            << batches << " batches" << endl;
 
       // Save the original data
       auto originalIndices = transparentData.indices;
 
       // Render in batches
-           cerr << "  Metal batch " << (batch + 1) << "/" << batches
+      for (size_t batch = 0; batch < batches; batch++) {
         // Calculate the range for this batch
         size_t start = batch * maxFragmentsPerBatch;
         size_t end = std::min(start + maxFragmentsPerBatch, fragmentCount);
@@ -4683,17 +4687,16 @@ void AsyVkRender::renderTransparencyStaged(FrameObject& object, int imageIndex) 
              << " (fragments " << start << " to " << end << ")" << endl;
 
         // Create a subset of the data for this batch
-           // Add extended delay between batches for Metal GPU safety
+        transparentData.indices.clear();
         transparentData.indices.insert(
-           std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          transparentData.indices.end(),
           originalIndices.begin() + start,
           originalIndices.begin() + end
         );
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         // Render this batch
         drawTransparent(object);
-        // Add a small delay between batches to let the GPU catch up
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
 
       // Restore the original data
@@ -4942,13 +4945,13 @@ void AsyVkRender::drawFrame()
       try {
         // Add a small delay before submission to let the GPU catch up
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        
+
         // Submit with a try-catch block
-        renderQueue.submit(1, &submitInfo, nullptr);
-      } catch (const vk::SystemError& e) {
-        cerr << "System error during queue submission: " << e.what() << endl;
+        (void) renderQueue.submit(1, &submitInfo, nullptr);
       } catch (const vk::OutOfDeviceMemoryError& e) {
         outOfMemory();
+      } catch (const vk::SystemError& e) {
+        cerr << "System error during queue submission: " << e.what() << endl;
       }
   } else {
       submitInfo.pSignalSemaphores = signalSems.data();
